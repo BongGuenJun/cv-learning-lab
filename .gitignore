@@ -1,0 +1,12 @@
+# Python 가상환경과 자동 생성 파일
+.venv/
+__pycache__/
+*.pyc
+
+# 비밀 설정
+.env
+
+# 데이터와 모델 가중치
+data/
+*.pt
+*.pth

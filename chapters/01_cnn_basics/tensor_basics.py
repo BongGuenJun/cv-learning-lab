@@ -18,4 +18,3 @@ print("RGB 첫 이미지:", rgb_images[0].shape)
 print("RGB 첫 배치:", rgb_images[:1].shape)
 
 print("기존 원소 수:", images.numel())
-images.reshape(4, 3, 8, 8)
