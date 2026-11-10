@@ -204,3 +204,23 @@ plt.close(fig)
 
 print("CSV 저장:", csv_path)
 print("그래프 저장:", figure_path)
+
+#학습이 끝난 모델과 추론에 필요한 정보를 저장
+checkpoint_dir = PROJECT_ROOT / "checkpoints"
+checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+checkpoint_path = checkpoint_dir / "smallcnn_cifar10.pt"
+
+checkpoint = {
+    "model_state_dict":model.state_dict(),
+    "model_name":"SmallCNN",
+    "classes":dataset.classes,
+    "input_size":[32,32],
+    "color_mode":"RGB",
+    "preprocessing":"ToTensor",
+    "epochs":epochs,
+}
+
+torch.save(checkpoint, checkpoint_path)
+
+print("모델 저장:", checkpoint_path)
