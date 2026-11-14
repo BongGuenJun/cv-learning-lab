@@ -1,7 +1,7 @@
 # CV Learning Lab
 
-컴퓨터 비전의 개념, 모델 구현, 학습·추론과 비교 실험을 기록하는 학습 저장소입니다.
-학습한 내용을 챕터별·모델별·기술별로 정리하고 계속 확장합니다.
+컴퓨터 비전의 개념, 모델 구조, 학습·추론과 비교 실험을 기록하는 학습 저장소입니다.
+챕터별·모델별·기술별로 정리하며, 추가 학습에 따라 계속 확장합니다.
 
 ## 개발 환경
 
@@ -10,6 +10,20 @@
 - Python / 프로젝트별 가상환경
 - PyTorch / torchvision / matplotlib
 - CPU 실행
+
+## 학습 진행
+
+| 챕터 | 내용 | 상태 |
+|---|---|---|
+| 1 | 텐서와 작은 CNN 기초 | 완료 |
+| 2 | 학습·검증과 지표 시각화 | 완료 |
+| 3 | 모델 저장·복원과 외부 이미지 추론 | 완료 |
+| 4 | 채널 수에 따른 통제된 비교 실험 | 완료 |
+| 5 | ResNet과 전이학습·파인튜닝 | 실험 완료 |
+| 이후 | Transformer·ViT, 객체 탐지, 추론 활용과 Docker 등 | 예정 |
+
+실험 결과는 기록된 데이터·학습 조건에서 관찰한 값이다.
+모델의 일반적인 성능 순위나 최적 설정을 입증하는 결과로 해석하지 않는다.
 
 <details>
 <summary>챕터별 정리</summary>
@@ -135,7 +149,7 @@ model.load_state_dict(checkpoint["model_state_dict"])
 model.eval()
 ```
 
-- state_dict에는 가중치·편향 등 모델 상태가 들어간다.
+- state_dict에는 가중치·편향과 버퍼 등 모델 상태가 들어간다.
 - 모델 구조의 Python 코드 자체를 저장하는 것은 아니다.
 - 복원할 때 호환되는 구조를 생성한 뒤 저장된 상태를 적용한다.
 - 현재는 마지막 epoch 상태를 저장하며 optimizer 상태는 포함하지 않는다.
@@ -143,10 +157,8 @@ model.eval()
 
 ### 외부 이미지 적용
 
-```text
 이미지 읽기 → RGB 변환 → 32×32 Resize → ToTensor
 → 배치 차원 추가 → 모델 추론 → 클래스·점수 출력
-```
 
 ```python
 image_tensor = transform(image).unsqueeze(0)
@@ -288,236 +300,109 @@ Linear의 입력 특징 수도 변경했다.
 
 </details>
 
-</details>
-
 <details>
-<summary>모델별 정리</summary>
+<summary>챕터 5 — ResNet과 전이학습·파인튜닝</summary>
 
-<details>
-<summary>SmallCNN — 직접 구성한 이미지 분류 CNN</summary>
+### 학습 목표
 
-### 구조
+- ResNet18의 특징 추출과 분류 흐름 이해
+- 사전학습 가중치와 대응하는 전처리 사용
+- 1,000클래스 출력층을 10클래스 출력층으로 교체
+- 학습 범위·학습률·동결 해제 시점·BatchNorm 정책 비교
+- 저장한 모델을 외부 이미지에 적용
 
-```text
-Conv(3→c1) → ReLU → MaxPool
-→ Conv(c1→c2) → ReLU → MaxPool
-→ Flatten → Linear(c2×8×8→10)
+### ResNet18의 기본 흐름
+
+| 단계 | 출력 shape |
+|---|---|
+| 입력 | `[1, 3, 224, 224]` |
+| conv1 | `[1, 64, 112, 112]` |
+| bn1 → relu | `[1, 64, 112, 112]` |
+| maxpool | `[1, 64, 56, 56]` |
+| layer1 | `[1, 64, 56, 56]` |
+| layer2 | `[1, 128, 28, 28]` |
+| layer3 | `[1, 256, 14, 14]` |
+| layer4 | `[1, 512, 7, 7]` |
+| avgpool | `[1, 512, 1, 1]` |
+| flatten | `[1, 512]` |
+| fc | `[1, 1000]` |
+
+avgpool은 채널별 공간 정보를 평균으로 집계한다.
+flatten은 배치를 유지하면서 `[N, 512]`로 펼친다.
+fc는 512개 특징을 받아 클래스별 logits를 출력한다.
+
+### 전이학습 설정
+
+```python
+weights = ResNet18_Weights.IMAGENET1K_V1
+preprocess = weights.transforms()
+
+model = resnet18(weights=weights)
+
+for parameter in model.parameters():
+    parameter.requires_grad = False
+
+model.fc = nn.Linear(model.fc.in_features, 10)
 ```
 
-- 입력: RGB 32×32 이미지 배치
-- 출력: 클래스별 logits 10개
-- 합성곱: kernel=3, stride=1, padding=1
-- Pooling: kernel=2, stride=2
-- 채널 기본값: c1=8, c2=16
+기존 fc를 제거하고 새 fc로 교체한다.
+기존 1,000클래스에서 10개를 골라내는 작업이 아니다.
+새 fc는 초기화된 상태에서 CIFAR-10의 10개 클래스를 학습한다.
 
-### shape
+전처리는 짧은 변 256 Resize, 224×224 CenterCrop,
+텐서 변환과 ImageNet 평균·표준편차 기반 정규화를 사용했다.
 
-```text
-[N, 3, 32, 32]
-→ [N, c1, 16, 16]
-→ [N, c2, 8, 8]
-→ [N, c2×8×8]
-→ [N, 10]
-```
+### 공통 실험 조건
 
-### 특징·제약
+| 항목 | 설정 |
+|---|---|
+| 데이터 | CIFAR-10 공식 학습셋에서 학습 200장·검증 100장 |
+| 분할 | 서로 겹치지 않는 동일 인덱스 |
+| 초기 가중치 | ImageNet 사전학습 ResNet18 |
+| 출력층 | Linear(512, 10), 시드 42로 초기화 |
+| 입력 | RGB 224×224 |
+| 배치 크기 | 16 |
+| 학습 횟수 | 각 10 epoch |
+| 손실 함수 | CrossEntropyLoss |
+| Optimizer | SGD, momentum 미사용 |
+| 시드 | 42 |
+| 장치 | CPU |
+| 모델 저장 | 마지막 epoch 상태 |
 
-작은 구조로 층별 연산과 학습 흐름을 관찰하기 쉽다.
-Linear의 입력 특징 수가 고정되어 있으므로 입력 크기나
-공간 축소 구성을 바꿀 때 연결되는 shape를 확인해야 한다.
+각 실험은 동일한 사전학습 가중치와 새 출력층 초기화에서 시작했다.
+앞 실험의 학습 결과를 이어받지 않았다.
 
-### 학습한 내용
+### 실험별 변경 조건
 
-- CIFAR-10 학습·검증과 곡선 생성
-- 가중치 저장·복원과 외부 이미지 추론
-- 채널 8·16과 4·8의 비교
-- 파라미터 수와 CPU 순전파 시간 측정
+| 실험 | 학습 범위 | 특징 추출부 학습률 | fc 학습률 | BatchNorm 이동 통계 |
+|---|---|---:|---:|---|
+| head | fc | 해당 없음 | 0.01 | 고정 |
+| layer4 | layer4 + fc | 0.01 | 0.01 | 고정 |
+| full | 전체 파라미터 | 0.01 | 0.01 | 고정 |
+| layer4_dlr | layer4 + fc | 0.001 | 0.01 | 고정 |
+| staged | 1~5회 fc, 6~10회 layer4 + fc | 개방 후 0.01 | 0.01 | 고정 |
+| layer4_bn_update | layer4 + fc | 0.01 | 0.01 | 학습 중 전체 갱신 |
 
-### 클래스 순서
+학습 범위를 넓혀도 모델 구조나 전체 파라미터 수는 바뀌지 않는다.
+업데이트를 허용한 파라미터 수가 달라진다.
 
-```text
-airplane, automobile, bird, cat, deer,
-dog, frog, horse, ship, truck
-```
+| 범위 | 학습 가능 파라미터 수 |
+|---|---:|
+| fc | 5,130 |
+| layer4 + fc | 8,398,858 |
+| 전체 | 11,181,642 |
 
-[모델 코드](chapters/01_cnn_basics/model.py)
+### 10 epoch 결과
 
-</details>
+| 실험 | 최종 학습 accuracy | 최종 검증 accuracy | 최종 검증 loss |
+|---|---:|---:|---:|
+| head | 88.5% | 62% | 1.1355 |
+| layer4 | 100% | 66% | 0.9546 |
+| full | 49% | 14% | 3.0563 |
+| layer4_dlr | 96% | 63% | 0.9480 |
+| staged | 100% | 66% | 0.8317 |
+| layer4_bn_update | 98% | 58% | 1.1709 |
 
-</details>
-
-<details>
-<summary>기술별 정리</summary>
-
-<details>
-<summary>텐서·배치·shape</summary>
-
-- 이미지 배치는 `[N, C, H, W]`이다.
-- images[0]은 배치 차원을 제거하고 images[:1]은 유지한다.
-- reshape는 원소 수를 유지하며 형태를 바꾼다.
-- unsqueeze(0)은 맨 앞에 크기 1인 차원을 추가한다.
-- 텐서 용도에 따라 각 축의 의미가 다르다.
-
-</details>
-
-<details>
-<summary>합성곱·채널·가중치</summary>
-
-Conv2d의 앞 두 인자는 입력 채널과 출력 채널이다.
-배치 크기는 모델 생성 시 지정하지 않는다.
-
-일반적인 groups=1 합성곱의 가중치 shape는
-`[출력 채널, 입력 채널, 커널 높이, 커널 너비]`이다.
-
-각 출력 필터는 입력 채널별 계산을 합하고 편향을 더해 특징맵을 만든다.
-같은 필터를 배치의 모든 이미지에 적용한다.
-
-- weight[0]: 첫 출력 필터 전체
-- weight[0, 0]: 첫 출력 필터의 첫 입력 채널용 커널
-- features[0]: Sequential의 첫 번째 층
-- stride: 필터 이동 간격
-- padding: 입력 가장자리 확장
-
-특징 채널 축소와 RGB 입력 채널의 정보 제거는 다른 실험이다.
-
-</details>
-
-<details>
-<summary>ReLU·Pooling·Flatten·Linear</summary>
-
-- ReLU는 max(0, x)로 비선형성을 추가하고 shape를 유지한다.
-- ReLU의 음수 구간에서는 기울기가 0이다.
-- MaxPooling은 채널별 공간 크기를 줄이며 학습 파라미터가 없다.
-- Pooling은 작은 특징과 위치 정보를 잃을 수 있다.
-- Flatten은 배치를 유지하며 이미지별 특징을 펼친다.
-- Linear는 펼쳐진 특징 수를 받아 클래스별 점수로 변환한다.
-- Linear 자체는 채널·높이·너비를 구분하지 않는다.
-
-</details>
-
-<details>
-<summary>Dataset·전처리·DataLoader</summary>
-
-- Dataset은 이미지와 정답을 제공한다.
-- CIFAR-10의 train=True는 공식 학습용 분할을 선택한다.
-- Subset은 지정한 인덱스의 데이터만 사용한다.
-- randperm은 정수 인덱스를 중복 없이 섞는다.
-- ToTensor는 CIFAR-10 이미지를 `[C, H, W]`로 변환하고
-  픽셀값을 0~255에서 0~1로 바꾼다.
-- DataLoader는 데이터를 배치로 묶는다.
-- num_workers=0은 현재 프로세스에서 데이터를 읽는다는 뜻이다.
-- 마지막 배치는 설정한 배치 크기보다 작을 수 있다.
-- transform은 전처리를 담은 변수명이다.
-- torchvision.transforms와 신경망 구조 Transformer는 다른 개념이다.
-
-</details>
-
-<details>
-<summary>logits·Softmax·CrossEntropyLoss</summary>
-
-- logits는 클래스별 점수이며 확률이 아니다.
-- argmax(dim=1)은 클래스 축에서 최대 점수의 위치를 반환한다.
-- Softmax는 점수를 합이 1인 분포로 변환한다.
-- Softmax 점수는 실제 정답 확률을 보장하지 않는다.
-- CrossEntropyLoss 앞에 별도 Softmax를 붙이지 않는다.
-- 클래스 번호 형태의 정답은 이미지마다 하나이며 torch.long을 사용한다.
-
-</details>
-
-<details>
-<summary>역전파·Optimizer·학습 설정</summary>
-
-- zero_grad: 이전 기울기 초기화
-- backward: 기울기를 계산하여 grad에 누적
-- step: Optimizer 규칙에 따라 파라미터 수정
-- model.parameters(): 등록된 파라미터 제공
-- 기본 SGD: `새 가중치 = 현재 가중치 - 학습률 × 기울기`
-- detach().clone(): 기울기 추적에서 분리한 별도 복사본 생성
-
-가중치·편향은 학습 파라미터이다.
-학습률·배치·학습 횟수와 모델 구조·전처리는 사람이 선택하거나 탐색한다.
-가중치를 직접 수정할 수도 있지만 보통 학습 알고리즘으로 조정한다.
-
-</details>
-
-<details>
-<summary>학습·검증과 지표 집계</summary>
-
-- train()은 학습 모드 설정이며 학습 실행 자체가 아니다.
-- eval()은 평가 모드 설정이며 기울기 추적을 중지하지 않는다.
-- no_grad()는 기울기 추적을 중지하며 평가 모드를 설정하지 않는다.
-- 검증에서는 역전파와 파라미터 업데이트를 하지 않는다.
-- 전체 평균 loss는 배치 평균에 실제 배치 크기를 곱해 누적한 뒤
-  전체 이미지 수로 나눈다.
-- accuracy는 정답 수를 전체 이미지 수로 나눈다.
-- loss와 accuracy는 반영하는 정보가 달라 순위가 다를 수 있다.
-
-</details>
-
-<details>
-<summary>통제된 비교·난수 시드·탐색</summary>
-
-- 질문을 정하고 변경 조건과 고정 조건을 명시한다.
-- 데이터 분할과 배치 순서를 맞추어 비교한다.
-- 모델마다 새 모델과 optimizer를 생성한다.
-- 같은 seed가 서로 다른 모델의 초기 가중치를 같게 만들지는 않는다.
-- 짧은 학습 결과만으로 모델의 최종 우열을 단정하지 않는다.
-- 단일 seed 결과는 초기화에 따른 변동을 충분히 보여주지 못한다.
-
-설정 탐색에는 grid search, random search, Bayesian optimization 등이 있다.
-자동 탐색에서도 목표 지표·탐색 범위·자원 예산은 정해야 한다.
-현재는 최적값 탐색보다 변경의 영향을 이해하는 학습용 실험을 진행했다.
-
-</details>
-
-<details>
-<summary>CPU 추론시간 측정</summary>
-
-- 모델 로딩과 입력 준비를 측정에서 분리한다.
-- warm-up 후 반복 실행한다.
-- 장치·입력·batch size·자료형·스레드 수를 기록한다.
-- 짧은 호출은 여러 번 실행한 시간을 나누어 측정한다.
-- 묶음별 평균의 중앙값과 개별 요청 시간의 중앙값을 구분한다.
-- 파라미터 감소율과 실제 시간 감소율은 다를 수 있다.
-- 순전파 시간과 서비스 전체 응답시간을 구분한다.
-
-</details>
-
-<details>
-<summary>CSV·matplotlib</summary>
-
-- epoch별 지표를 딕셔너리로 만들어 리스트에 누적한다.
-- csv.DictWriter로 열 이름과 지표를 저장한다.
-- plt.subplots로 그림과 그래프 영역을 생성한다.
-- plot으로 곡선, legend로 범례를 표시한다.
-- Agg 백엔드로 창 없이 이미지를 저장한다.
-- savefig 후 plt.close로 그림 객체를 정리한다.
-
-</details>
-
-<details>
-<summary>체크포인트·저장·복원</summary>
-
-- 체크포인트는 특정 시점의 모델 상태를 저장한 것이다.
-- 폴더명 checkpoints 자체에 특별한 기능은 없다.
-- state_dict는 파라미터와 버퍼 등의 상태를 제공한다.
-- torch.save로 저장하고 torch.load로 읽는다.
-- load_state_dict로 모델에 상태를 적용한다.
-- .pt는 바이너리 파일이며 내부 저장 구조는 파일마다 다를 수 있다.
-- 모델 구조와 저장된 가중치의 이름·shape가 호환되어야 한다.
-- 현재 파일에는 optimizer 상태가 없어 전체 학습 재개 상태를 저장한 것은 아니다.
-
-</details>
-
-<details>
-<summary>Python 모듈·직접 실행</summary>
-
-- model.py는 모듈이고 SmallCNN은 그 안의 클래스이다.
-- from model import SmallCNN으로 클래스 정의를 가져온다.
-- Python은 일반적인 최상위 함수·클래스에 export가 필요 없다.
-- SmallCNN()은 인스턴스를 생성하며 학습 가중치를 자동으로 읽지 않는다.
-- 직접 실행한 파일의 __name__은 "__main__"이다.
-- 해당 조건문 아래 코드는 파일을 직접 실행할 때만 수행된다.
 
 </details>
 
