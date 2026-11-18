@@ -21,7 +21,9 @@
 | 4 | 채널 수에 따른 통제된 비교 실험 | 완료 |
 | 5 | ResNet과 전이학습·파인튜닝 | 실험 완료 |
 | 6 | Transformer·ViT 구현·활용과 PEFT 개요 | 완료 · PEFT는 개념 학습 |
-| 이후 | 객체 탐지, 추론 활용과 Docker 등 | 예정 |
+| 7 | 객체 탐지·YOLO·평가 지표와 모델 비교 | 완료 · 비교 모델은 개념 학습 |
+| 8 | 모델 선택·실험 해석과 오류 분석 | 예정 |
+| 9 | 추론 활용·Linux·Docker 재현 | 예정 |
 
 실험 결과는 기록된 데이터·학습 조건에서 관찰한 값이다.
 모델의 일반적인 성능 순위나 최적 설정을 입증하는 결과로 해석하지 않는다.
@@ -896,5 +898,327 @@ python chapters/03_transformer_vit/predict_finetuned_vit.py
 
 </details>
 
+
+<details>
+<summary>챕터 7 — 객체 탐지와 YOLO</summary>
+
+### 학습 내용과 범위
+
+- 분류와 탐지의 차이, 박스 좌표와 IoU
+- Confidence 필터와 클래스별 NMS
+- YOLOv8n 사전학습 모델의 실제 이미지 추론
+- YOLO 라벨 변환과 COCO8 소규모 학습
+- TP·FP·FN, Precision·Recall, AP·mAP의 의미
+- Faster R-CNN·SSD·RetinaNet·FCOS·DETR의 구조적 차이
+
+실제로 추론·학습한 탐지 모델은 YOLOv8n이다.
+다른 탐지 모델은 개념 비교이며 직접 학습하거나 동일 조건으로 성능을 비교하지 않았다.
+
+### 파일별 역할
+
+| 파일 | 역할 |
+|---|---|
+| [bbox_basics.py](chapters/04_object_detection/bbox_basics.py) | 왼쪽 위 기준 xywh 변환과 IoU 계산 |
+| [nms_basics.py](chapters/04_object_detection/nms_basics.py) | Confidence 필터·클래스별 NMS 구현 |
+| [predict_yolo.py](chapters/04_object_detection/predict_yolo.py) | 사전학습 YOLO 추론·시각화·CSV 저장 |
+| [yolo_labels.py](chapters/04_object_detection/yolo_labels.py) | xyxy와 YOLO 정규화 라벨 사이 변환 |
+| [train_yolo.py](chapters/04_object_detection/train_yolo.py) | COCO8 학습·검증·체크포인트 저장 |
+| [evaluation_basics.py](chapters/04_object_detection/evaluation_basics.py) | 한 이미지의 단순 매칭·TP·FP·FN 집계 |
+| [pr_curve_basics.py](chapters/04_object_detection/pr_curve_basics.py) | 임계값별 Precision·Recall 지점 시각화 |
+
+### 분류와 탐지
+
+분류는 이미지 전체의 클래스별 점수를 출력한다.
+탐지는 객체마다 위치·클래스·점수를 출력한다.
+객체 수가 이미지마다 다를 수 있으며 후처리 후 반환되는 박스 수도 달라진다.
+
+### 박스 좌표와 IoU
+
+| 형식 | 값 |
+|---|---|
+| xyxy | 왼쪽 위 x·y, 오른쪽 아래 x·y |
+| 왼쪽 위 기준 xywh | 왼쪽 위 x·y, 너비·높이 |
+| cxcywh | 중심 x·y, 너비·높이 |
+
+같은 박스의 예시는 xyxy=[10,20,50,60],
+왼쪽 위 기준 xywh=[10,20,40,40], cxcywh=[30,40,40,40]이다.
+xywh라는 이름만 보고 좌표 기준을 단정하지 않는다.
+
+IoU는 교집합 면적을 합집합 면적으로 나눈 값이다.
+합집합은 두 박스 면적의 합에서 교집합을 뺀다.
+실습은 연속 좌표 기준으로 너비=x2-x1, 높이=y2-y1을 사용했다.
+
+| 박스 비교 | IoU |
+|---|---:|
+| [0,0,40,40]와 [20,20,60,60] | 0.1429 |
+| 동일 박스 | 1 |
+| 겹치지 않는 박스 | 0 |
+
+IoU는 클래스 정답 여부와 별개이다.
+예측과 정답의 위치 평가뿐 아니라 예측 박스 사이의 중복 처리에도 사용한다.
+
+### Confidence와 NMS
+
+Confidence는 모델이 탐지 후보에 부여한 점수이며 실제 정답 확률을 보장하지 않는다.
+점수 계산 방식은 모델·버전에 따라 다르다.
+
+```mermaid
+flowchart TD
+    P["예측 후보"] --> C["Confidence 기준으로 필터"]
+    C --> S["점수순 정렬"]
+    S --> B["최고 점수 후보 유지"]
+    B --> N["같은 클래스의 높은 IoU 후보 제거"]
+    N --> Q{"후보가 남았는가?"}
+    Q -->|"예"| B
+    Q -->|"아니오"| O["최종 탐지"]
+```
+
+- Confidence 기준을 높이면 낮은 점수 후보를 더 많이 제거한다.
+- NMS IoU 기준을 낮추면 겹치는 같은 클래스 후보를 더 적극적으로 제거한다.
+- 클래스별 NMS는 다른 클래스 사이의 모순을 직접 해결하지 않는다.
+- NMS는 인접한 실제 객체를 중복으로 판단할 수도 있다.
+- 두 과정 모두 정답 박스 없이 수행한다.
+
+실습에서는 A·B·C·D·E 후보 중 A·D·C가 남았다.
+B는 같은 클래스의 높은 겹침 때문에, E는 낮은 점수 때문에 제거됐다.
+같은 위치의 cat과 dog는 클래스별 NMS에서 함께 남을 수 있음을 확인했다.
+
+### YOLOv8의 구조
+
+```mermaid
+flowchart TD
+    I["이미지"] --> P["크기 조정·전처리"]
+    P --> B["Backbone · 특징 추출"]
+    B --> N["Neck · 여러 해상도 특징 결합"]
+    N --> H["Head · 박스와 클래스 예측"]
+    H --> F["Confidence 필터·NMS"]
+    F --> O["원본 좌표의 박스·클래스·점수"]
+```
+
+YOLOv8은 CNN 기반의 1-stage 탐지기로,
+사전 정의된 크기·비율의 anchor box를 쓰지 않는 anchor-free 방식과 분리형 Head를 사용한다.
+Anchor-free도 특징맵의 기준 위치는 사용할 수 있다.
+
+| 특징맵 | stride | 정사각형 640 입력에서 공간 크기 |
+|---|---:|---|
+| P3 | 8 | 80×80 |
+| P4 | 16 | 40×40 |
+| P5 | 32 | 20×20 |
+
+이 예시의 기준 위치 수는 8,400개이다. 실제 객체 수를 뜻하지 않는다.
+실제 predict 입력은 비율·패딩에 따라 달라질 수 있어 항상 이 개수인 것은 아니다.
+여러 해상도는 물체의 크기 차이에 대응하는 데 도움을 주지만 미세한 오염 판별을 보장하지 않는다.
+Stride는 입력상의 기준 위치 간격이며 수용 영역의 크기와 같지 않다.
+
+Ultralytics는 모델 로딩·학습·추론을 제공하는 라이브러리이다.
+YOLO 객체의 train은 실제 학습을 실행하고,
+PyTorch nn.Module의 train은 학습 모드를 설정한다는 차이가 있다.
+
+### 사전학습 모델 추론 관찰
+
+| 항목 | 설정 |
+|---|---|
+| 모델 | 공식 COCO 사전학습 yolov8n.pt |
+| Ultralytics | 8.4.215 |
+| 장치 | CPU |
+| 입력 설정 | imgsz=640 |
+| NMS | 클래스별, IoU 기준 0.5 |
+| 원본 이미지 | 높이 306·너비 299, AI 생성 춤추는 고양이 |
+
+| Confidence 기준 | 반환 결과 |
+|---|---|
+| 0.25 | 탐지 0개 |
+| 0.05 | dog 17.62%, dog 16.47%, person 14.12%, pizza 6.93% |
+
+낮은 기준에서 후보는 증가했지만 올바른 cat 탐지로 이어지지 않았다.
+두 dog 박스 사이 IoU는 약 0.17로 NMS 기준보다 낮아 모두 남았다.
+다른 클래스 사이에서는 클래스별 NMS가 제거를 수행하지 않았다.
+
+비전형적인 자세·형태가 영향을 주었을 가능성은 있으나 원인은 검증하지 않았다.
+AI 생성 이미지라는 사실만으로 실패 원인을 확정하지 않는다.
+한 장의 예시로 YOLO의 일반적인 성능을 판단하지 않는다.
+분류기와 탐지기는 과제·학습 조건·클래스 구성이 달라 결과를 단순 우열로 비교하지 않는다.
+
+### 학습 라벨
+
+Ultralytics의 기본 탐지 라벨은 객체마다 다음 한 줄을 사용한다.
+
+```text
+class_id center_x center_y width height
+```
+
+- 클래스 번호는 데이터셋의 names 정의와 맞춘다.
+- 중심 x와 너비는 원본 이미지 너비로 나눈다.
+- 중심 y와 높이는 원본 이미지 높이로 나눈다.
+- 라벨에는 예측 confidence를 넣지 않는다.
+- 이미지 파일과 라벨 파일의 이름을 대응시킨다.
+- 라벨이 수치 범위를 만족해도 실제 위치가 옳은지는 별도 확인이 필요하다.
+
+100×100 이미지의 xyxy=[10,20,50,60]을 변환하고 복원했다.
+
+```text
+YOLO 좌표: [0.3, 0.4, 0.4, 0.4]
+예제 라벨: 0 0.300000 0.400000 0.400000 0.400000
+복원: [10.0, 20.0, 50.0, 60.0]
+```
+
+예제의 클래스 0은 임의 정의이며 COCO의 클래스 번호와 혼동하지 않는다.
+
+### COCO8 학습·검증
+
+| 항목 | 설정 |
+|---|---|
+| 데이터 | COCO8, 학습 4장·검증 4장 |
+| 시작 모델 | COCO 사전학습 YOLOv8n |
+| 학습 | 10 epoch |
+| 입력·배치 | 320 / 4 |
+| 장치·데이터 로딩 | CPU / workers=0 |
+| 옵티마이저 | SGD, 초기 lr=0.001 |
+| 시드 | 42 |
+| 혼합 정밀도 | 사용하지 않음 |
+| 조기 종료 | 비활성화 |
+| 기타 설정 | 증강 등을 포함한 실제 적용값은 args.yaml에 기록 |
+
+데이터 로딩 → 학습 → 검증 → 지표·그래프·가중치 저장을 확인했다.
+작은 파이프라인 점검용 데이터이며, 사전학습 데이터와의 관계도 고려해야 한다.
+대표성 있는 일반화 성능이나 모델 간 우열을 입증하는 실험이 아니다.
+
+| 산출물 | 역할 |
+|---|---|
+| [args.yaml](results/yolo_training/yolov8n_coco8/args.yaml) | 실제 실행 설정 |
+| [results.csv](results/yolo_training/yolov8n_coco8/results.csv) | epoch별 손실·지표 |
+| [results.png](results/yolo_training/yolov8n_coco8/results.png) | 학습 곡선 |
+| weights/best.pt | 라이브러리 검증 평가 기준으로 선택한 가중치 |
+| weights/last.pt | 마지막 상태의 가중치 |
+
+가중치 파일은 Git에서 제외한다.
+검증 로그의 이미지당 inference 시간은 모델 로딩·업로드·통신을 포함한 전체 서비스 응답시간이 아니다.
+box_loss는 위치 회귀, cls_loss는 클래스, dfl_loss는 박스 경계 거리 분포 학습에 관련된 손실이다.
+DFL은 RetinaNet의 분류용 Focal Loss와 구분한다.
+
+### TP·FP·FN과 단순 매칭 실습
+
+실습에서는 높은 점수부터 같은 클래스의 아직 매칭되지 않은 정답과 비교했다.
+IoU가 기준 이상이면 TP, 매칭되지 않은 예측은 FP,
+끝까지 매칭되지 않은 정답은 FN으로 집계했다.
+
+| 항목 | 의미 |
+|---|---|
+| TP | 정답과 정상 매칭된 예측 |
+| FP | 정답과 매칭되지 않은 예측 |
+| FN | 어떤 예측과도 매칭되지 않은 정답 |
+
+정답 하나를 여러 예측의 TP로 중복 집계하지 않는다.
+위치가 맞아도 클래스가 틀리면 해당 예측은 FP가 되고, 놓친 정답은 FN으로 남을 수 있다.
+
+실습 결과는 TP=1, FP=2, FN=1,
+Precision=1/3=33.33%, Recall=1/2=50%였다.
+
+단순 예제는 공식 COCO 평가기가 아니다.
+실제 평가는 클래스별·이미지별 매칭과 ignore·crowd·최대 탐지 수 등의 규칙을 따른다.
+실습 함수를 데이터셋 전체에 그대로 적용하여 공식 AP라고 부르지 않는다.
+
+### Precision·Recall과 AP·mAP
+
+- Precision = TP / (TP + FP)
+- Recall = TP / (TP + FN)
+- AP는 한 클래스의 점수 순위에 따른 Precision–Recall 관계를 정해진 규칙으로 요약한다.
+- mAP는 클래스별 AP의 평균이다.
+- mAP50은 IoU 0.5 기준의 평균 AP이다.
+- mAP50-95는 IoU 0.50~0.95를 0.05 간격으로 평가한 AP와 클래스를 평균한다.
+- IoU 기준과 confidence 기준, NMS IoU 기준은 역할이 다르다.
+
+한 클래스에 정답 2개, 점수순 TP·FP·TP 예측을 둔 실습:
+
+| Confidence 기준 | TP | FP | FN | Precision | Recall |
+|---|---:|---:|---:|---:|---:|
+| 0.90 | 1 | 0 | 1 | 100% | 50% |
+| 0.70 | 1 | 1 | 1 | 50% | 50% |
+| 0.50 | 2 | 1 | 0 | 66.67% | 100% |
+
+기준을 낮출 때 Precision이 매 지점 반드시 감소하는 것은 아니다.
+이번 그림은 세 동작 지점을 연결한 것으로 공식 보간 AP 계산 결과가 아니다.
+
+![임계값별 Precision–Recall](results/detection_metrics/pr_operating_points.png)
+
+Ultralytics 표의 개별 클래스 행은 AP, all 행은 클래스 평균 mAP로 읽는다.
+요약 P·R은 곡선에서 선택·보간한 지점일 수 있으므로 정수 개수로 직접 역산하지 않는다.
+
+### 탐지 모델 비교: 개념 학습
+
+| 모델 | 주요 접근 | 핵심 차이 |
+|---|---|---|
+| YOLOv8 | 1-stage·anchor-free | 여러 해상도에서 박스·클래스 밀집 예측 |
+| SSD | 1-stage·anchor-based | 여러 특징맵에서 기준 박스 보정 |
+| RetinaNet | 1-stage·anchor-based | Focal Loss로 쉬운 배경 예제의 손실 기여 완화 |
+| FCOS | 1-stage·anchor-free | 기준점에서 네 경계까지 거리와 centerness 사용 |
+| Faster R-CNN | 2-stage | RPN 후보 제안 후 영역별 분류·박스 보정 |
+| 원형 DETR | Transformer 기반 집합 예측 | 객체 Query·일대일 매칭으로 학습, 일반적인 NMS 없이 출력 |
+
+Stage 수와 anchor 유무는 다른 분류 축이다.
+여러 해상도 특징 사용도 YOLO만의 고유한 선택 근거는 아니다.
+
+Faster R-CNN은 특징맵을 공유하고 후보 영역별 특징을 처리한다.
+원형은 RoI Pooling을 사용했으며 현대적 구현에는 RoIAlign도 사용된다.
+후보마다 원본 크롭을 Backbone에 처음부터 다시 넣는 구조와 다르다.
+
+RetinaNet의 Focal Loss는 쉬운 예제의 손실 기여를 줄인다.
+전경·배경 불균형 대응과 희소 클래스 데이터 부족의 해결을 동일시하지 않는다.
+
+FCOS의 기준점이 (x,y), 경계 거리가 (l,t,r,b)이면
+박스는 [x-l,y-t,x+r,y+b]로 표현할 수 있다.
+
+원형 DETR의 Query는 클래스별로 미리 정한 토큰이 아니다.
+정답과 매칭되지 않은 슬롯은 객체 없음을 학습한다.
+원형의 긴 학습·작은 객체 관련 한계를 모든 후속 DETR 계열에 그대로 적용하지 않는다.
+
+### 모델 선택과 파이프라인 용어
+
+카메라 입력이라는 이유만으로 탐지가 필수인 것은 아니다.
+배경·객체 위치가 변하고 위치 출력 또는 객체별 처리가 필요하다는 요구가 탐지 선택에 연결된다.
+물체의 크기 차이, 미세한 오염 표현, 추론 비용은 별도 조건으로 검토한다.
+
+경량 YOLOv8n은 사전학습 가중치와 학습·추론 도구를 활용하여
+기준 파이프라인을 구성할 후보가 될 수 있다.
+다른 탐지기와 직접 비교하지 않았다면 최적임을 입증했다고 표현하지 않는다.
+모델 이름만으로 정확도와 속도의 고정 순위를 정하지 않는다.
+
+| 표현 | 의미 |
+|---|---|
+| 2-stage 탐지기 | 탐지 모델 내부의 후보 제안 → 후보별 판별 |
+| 탐지 후 별도 분류 파이프라인 | 탐지 → 원본 크롭 → 별도 분류 모델 |
+
+1-stage 탐지기를 사용해도 여러 모델로 구성한 2단계 파이프라인을 만들 수 있다.
+탐지 박스 오류가 크롭 내용과 이후 분류 결과로 전파될 수 있다.
+
+### 실행
+
+```bash
+python chapters/04_object_detection/bbox_basics.py
+python chapters/04_object_detection/nms_basics.py
+python chapters/04_object_detection/predict_yolo.py
+python chapters/04_object_detection/yolo_labels.py
+python chapters/04_object_detection/train_yolo.py
+python chapters/04_object_detection/evaluation_basics.py
+python chapters/04_object_detection/pr_curve_basics.py
+```
+
+### 참고 자료
+
+- [Ultralytics YOLOv8](https://docs.ultralytics.com/models/yolov8/)
+- [YOLOv8 모델 구성](https://github.com/ultralytics/ultralytics/blob/main/ultralytics/cfg/models/v8/yolov8.yaml)
+- [추론](https://docs.ultralytics.com/modes/predict/)
+- [학습](https://docs.ultralytics.com/modes/train/)
+- [탐지 데이터 형식](https://docs.ultralytics.com/datasets/detect/)
+- [COCO8](https://docs.ultralytics.com/datasets/detect/coco8/)
+- [Faster R-CNN](https://arxiv.org/abs/1506.01497)
+- [SSD](https://arxiv.org/abs/1512.02325)
+- [RetinaNet·Focal Loss](https://arxiv.org/abs/1708.02002)
+- [FCOS](https://arxiv.org/abs/1904.01355)
+- [DETR](https://arxiv.org/abs/2005.12872)
+
 </details>
+
+</details>
+
 
